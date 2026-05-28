@@ -20,8 +20,19 @@
 #endif
 
 #include <climits>
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
+
+#ifndef ZXING_QR_DEBUG_LOG
+#define ZXING_QR_DEBUG_LOG 0
+#endif
+
+#if ZXING_QR_DEBUG_LOG
+#define LOG_DEBUG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define LOG_DEBUG(...)
+#endif
 
 namespace ZXing {
 
@@ -247,6 +258,9 @@ Barcode ReadBarcode(const ImageView& _iv, const ReaderOptions& opts)
 
 Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 {
+	LOG_DEBUG( "[zx-trace] ReadBarcodes enter w=%d h=%d tryHarder=%d tryInvert=%d maxSymbols=%d\n",
+			_iv.width(), _iv.height(), opts.tryHarder(), opts.tryInvert(), opts.maxNumberOfSymbols());
+
 	if (sizeof(PatternType) < 4 && (_iv.width() > 0xffff || _iv.height() > 0xffff))
 		throw std::invalid_argument("Maximum image width/height is 65535");
 
@@ -255,6 +269,8 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 
 	LumImage lum;
 	ImageView iv = SetupLumImageView(_iv, lum, opts);
+	LOG_DEBUG( "[zx-trace] SetupLumImageView done fmt=%u pixStride=%d rowStride=%d\n",
+			static_cast<unsigned>(iv.format()), iv.pixStride(), iv.rowStride());
 	MultiFormatReader reader(opts);
 
 	if (opts.isPure())
@@ -271,10 +287,12 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 	}
 #endif
 	LumImagePyramid pyramid(iv, opts.downscaleThreshold() * opts.tryDownscale(), opts.downscaleFactor());
+	LOG_DEBUG( "[zx-trace] Pyramid layers=%zu\n", pyramid.layers.size());
 
 	Barcodes res;
 	int maxSymbols = opts.maxNumberOfSymbols() ? opts.maxNumberOfSymbols() : INT_MAX;
 	for (auto&& iv : pyramid.layers) {
+		LOG_DEBUG( "[zx-trace] Layer w=%d h=%d maxSymbols=%d\n", iv.width(), iv.height(), maxSymbols);
 		auto bitmap = CreateBitmap(opts.binarizer(), iv);
 		for (int close = 0; close <= (closedReader ? 1 : 0); ++close) {
 			if (close) {
@@ -288,7 +306,9 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 			for (int invert = 0; invert <= static_cast<int>(opts.tryInvert() && !close); ++invert) {
 				if (invert)
 					bitmap->invert();
+				LOG_DEBUG( "[zx-trace] reader.read close=%d invert=%d\n", close, invert);
 				auto rs = (close ? *closedReader : reader).read(*bitmap, maxSymbols);
+				LOG_DEBUG( "[zx-trace] reader.read returned n=%zu\n", rs.size());
 				for (auto& r : rs) {
 					if (iv.width() != _iv.width())
 						r.d->position = Scale(r.position(), _iv.width() / iv.width());
@@ -299,6 +319,7 @@ Barcodes ReadBarcodes(const ImageView& _iv, const ReaderOptions& opts)
 						--maxSymbols;
 					}
 				}
+				LOG_DEBUG( "[zx-trace] ReadBarcodes exit n=%zu\n", res.size());
 				if (maxSymbols <= 0)
 					return res;
 			}

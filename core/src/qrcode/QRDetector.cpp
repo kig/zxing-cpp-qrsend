@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iterator>
 #include <map>
@@ -34,6 +35,16 @@
 #include "BitMatrixIO.h"
 #else
 #define printf(...){}
+#endif
+
+#ifndef ZXING_QR_DEBUG_LOG
+#define ZXING_QR_DEBUG_LOG 0
+#endif
+
+#if ZXING_QR_DEBUG_LOG
+#define LOG_DEBUG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define LOG_DEBUG(...)
 #endif
 
 namespace ZXing::QRCode {
@@ -61,6 +72,7 @@ std::vector<ConcentricPattern> FindFinderPatterns(const BitMatrix& image, bool t
 	// number of pixels the center could be, so skip this often. When trying harder, look for all
 	// QR versions regardless of how dense they are.
 	int height = image.height();
+	int width = image.width();
 	int skip = (3 * height) / (4 * MAX_MODULES_FAST);
 	if (skip < MIN_SKIP || tryHarder)
 		skip = MIN_SKIP;
@@ -70,10 +82,20 @@ std::vector<ConcentricPattern> FindFinderPatterns(const BitMatrix& image, bool t
 	PatternRow row;
 
 	for (int y = skip - 1; y < height; y += skip) {
+		if (((y - (skip - 1)) / skip) % 32 == 0)
+			LOG_DEBUG( "[zx-trace] FindFinderPatterns row y=%d/%d skip=%d width=%d\n", y, height, skip, width);
 		GetPatternRow(image, y, row, false);
 		PatternView next = row;
+		int guard = 0;
+		const int guardLimit = width * 8 + 1024;
 
 		while (next = FindPattern(next), next.isValid()) {
+			if (++guard > guardLimit) {
+				LOG_DEBUG(
+						"[zx-trace] FindFinderPatterns guard-break y=%d guard=%d limit=%d next.front=%d next.size=%d\n",
+						y, guard, guardLimit, next.pixelsInFront(), next.size());
+				break;
+			}
 			PointF p(next.pixelsInFront() + next[0] + next[1] + next[2] / 2.0, y + 0.5);
 
 			// make sure p is not 'inside' an already found pattern area

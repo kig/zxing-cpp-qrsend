@@ -31,7 +31,18 @@
 #include "qrcode/QRReader.h"
 #endif
 
+#include <cstdio>
 #include <memory>
+
+#ifndef ZXING_QR_DEBUG_LOG
+#define ZXING_QR_DEBUG_LOG 0
+#endif
+
+#if ZXING_QR_DEBUG_LOG
+#define LOG_DEBUG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define LOG_DEBUG(...)
+#endif
 
 namespace ZXing {
 
@@ -77,12 +88,16 @@ MultiFormatReader::~MultiFormatReader() = default;
 
 Barcodes MultiFormatReader::read(const BinaryBitmap& image, int maxSymbols) const
 {
+	LOG_DEBUG( "[zx-trace] MultiFormatReader::read readers=%zu maxSymbols=%d inverted=%d\n",
+			_readers.size(), maxSymbols, image.inverted());
 	Barcodes res;
 
 	for (const auto& reader : _readers) {
 		if (image.inverted() && !reader->supportsInversion)
 			continue;
+		LOG_DEBUG( "[zx-trace] reader->read enter supportsInv=%d\n", reader->supportsInversion);
 		auto r = reader->read(image, maxSymbols);
+		LOG_DEBUG( "[zx-trace] reader->read exit n=%zu\n", r.size());
 		if (!_opts.returnErrors())
 			std::erase_if(r, [](auto&& s) { return !s.isValid(); });
 		maxSymbols -= Size(r);
@@ -90,6 +105,7 @@ Barcodes MultiFormatReader::read(const BinaryBitmap& image, int maxSymbols) cons
 		if (maxSymbols <= 0)
 			break;
 	}
+	LOG_DEBUG( "[zx-trace] MultiFormatReader::read exit total=%zu\n", res.size());
 
 	// sort barcodes based on their position on the image
 	std::sort(res.begin(), res.end(), [](const Barcode& l, const Barcode& r) {

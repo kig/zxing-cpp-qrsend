@@ -24,9 +24,20 @@
 #include "ZXTestSupport.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#ifndef ZXING_QR_DEBUG_LOG
+#define ZXING_QR_DEBUG_LOG 0
+#endif
+
+#if ZXING_QR_DEBUG_LOG
+#define LOG_DEBUG(...) LOG_DEBUG( __VA_ARGS__)
+#else
+#define LOG_DEBUG(...)
+#endif
 
 namespace ZXing::QRCode {
 
@@ -89,9 +100,13 @@ static void DecodeKanjiSegment(BitSource& bits, int count, Content& result)
 	result.switchEncoding(CharacterSet::Shift_JIS);
 	result.reserve(2 * count);
 
+	LOG_DEBUG( "[zx-trace] DecodeKanjiSegment enter count=%d avail=%d\n", count, bits.available());
+	int charIndex = 0;
 	while (count > 0) {
 		// Each 13 bits encodes a 2-byte character
+		LOG_DEBUG( "[zx-trace] DecodeKanjiSegment char[%d/%d] readBits(13) avail=%d\n", charIndex, count, bits.available());
 		int twoBytes = bits.readBits(13);
+		LOG_DEBUG( "[zx-trace] DecodeKanjiSegment char[%d/%d] readBits exit twoBytes=%d\n", charIndex, count, twoBytes);
 		int assembledTwoBytes = ((twoBytes / 0x0C0) << 8) | (twoBytes % 0x0C0);
 		if (assembledTwoBytes < 0x01F00) {
 			// In the 0x8140 to 0x9FFC range
@@ -103,7 +118,9 @@ static void DecodeKanjiSegment(BitSource& bits, int count, Content& result)
 		result.push_back(assembledTwoBytes >> 8);
 		result.push_back(assembledTwoBytes);
 		count--;
+		charIndex++;
 	}
+	LOG_DEBUG( "[zx-trace] DecodeKanjiSegment exit chars=%d\n", charIndex);
 }
 
 static void DecodeByteSegment(BitSource& bits, int count, Content& result)
@@ -218,8 +235,16 @@ bool IsEndOfStream(const BitSource& bits, const Version& version)
 {
 	const int bitsRequired = TerminatorBitsLength(version);
 	const int bitsAvailable = std::min(bits.available(), bitsRequired);
-	return bitsAvailable == 0 || bits.peekBits(bitsAvailable) == 0;
+	if (bitsAvailable == 0) {
+		LOG_DEBUG( "[zx-trace] IsEndOfStream bitsAvailable=0 -> true\n");
+		return true;
+	}
+	LOG_DEBUG( "[zx-trace] IsEndOfStream peekBits(%d) enter\n", bitsAvailable);
+	bool result = bits.peekBits(bitsAvailable) == 0;
+	LOG_DEBUG( "[zx-trace] IsEndOfStream peekBits(%d) exit result=%d\n", bitsAvailable, result);
+	return result;
 }
+
 
 /**
 * <p>QR Codes can encode text as bits in one of several modes, and can use multiple modes
@@ -242,36 +267,47 @@ DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCo
 
 	try
 	{
+		int iter = 0;
+		const int maxIter = std::max(64, static_cast<int>(bytes.size()) * 4 + 64);
+		LOG_DEBUG( "[zx-trace] DecodeBitStream loop start avail=%d modeBitLength=%d maxIter=%d\n",
+				bits.available(), modeBitLength, maxIter);
 		while(!IsEndOfStream(bits, version)) {
+			const int beforeAvail = bits.available();
+			if (++iter > maxIter)
+				throw FormatError("DecodeBitStream exceeded iteration budget");
+			LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d avail=%d IsEndOfStream=false modeBitLength=%d\n",
+					iter, beforeAvail, modeBitLength);
 			CodecMode mode;
-			if (modeBitLength == 0)
+			if (modeBitLength == 0) {
+				LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d mode=NUMERIC (model1)\n", iter);
 				mode = CodecMode::NUMERIC; // MicroQRCode version 1 is always NUMERIC and modeBitLength is 0
-			else
-				mode = CodecModeForBits(bits.readBits(modeBitLength), version.type());
+			} else {
+				LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d readBits(%d) enter\n", iter, modeBitLength);
+				int modeBits = bits.readBits(modeBitLength);
+				LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d readBits(%d) exit modeBits=%d\n", iter, modeBitLength, modeBits);
+				mode = CodecModeForBits(modeBits, version.type());
+				LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d CodecModeForBits exit mode=%d\n", iter, static_cast<int>(mode));
+			}
 
+			LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d mode=%d avail=%d\n", iter, static_cast<int>(mode), bits.available());
 			switch (mode) {
 			case CodecMode::FNC1_FIRST_POSITION:
-//				if (!result.empty()) // uncomment to enforce specification
-//					throw FormatError("GS1 Indicator (FNC1 in first position) at illegal position");
 				result.symbology.modifier = '3';
-				result.symbology.aiFlag = AIFlag::GS1; // In Alphanumeric mode undouble doubled '%' and treat single '%' as <GS>
+				result.symbology.aiFlag = AIFlag::GS1;
 				break;
 			case CodecMode::FNC1_SECOND_POSITION:
 				if (!result.empty())
 					throw FormatError("AIM Application Indicator (FNC1 in second position) at illegal position");
-				result.symbology.modifier = '5'; // As above
-				// ISO/IEC 18004:2015 7.4.8.3 AIM Application Indicator (FNC1 in second position), "00-99" or "A-Za-z"
-				if (int appInd = bits.readBits(8); appInd < 100) // "00-09"
+				result.symbology.modifier = '5';
+				if (int appInd = bits.readBits(8); appInd < 100)
 					result.append(ZXing::ToString(appInd, 2));
-				else if ((appInd >= 165 && appInd <= 190) || (appInd >= 197 && appInd <= 222)) // "A-Za-z"
+				else if ((appInd >= 165 && appInd <= 190) || (appInd >= 197 && appInd <= 222))
 					result.push_back(appInd - 100);
 				else
 					throw FormatError("Invalid AIM Application Indicator");
-				result.symbology.aiFlag = AIFlag::AIM; // see also above
+				result.symbology.aiFlag = AIFlag::AIM;
 				break;
 			case CodecMode::STRUCTURED_APPEND:
-				// sequence number and parity is added later to the result metadata
-				// Read next 4 bits of index, 4 bits of symbol count, and 8 bits of parity data, then continue
 				structuredAppend.index = bits.readBits(4);
 				structuredAppend.count = bits.readBits(4) + 1;
 				structuredAppend.id    = std::to_string(bits.readBits(8));
@@ -279,32 +315,33 @@ DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCo
 			case CodecMode::ECI:
 				if (version.isModel1())
 					throw FormatError("QRCode Model 1 does not support ECI");
-				// Count doesn't apply to ECI
 				result.switchEncoding(ParseECIValue(bits));
 				break;
-			case CodecMode::HANZI: {
-				// First handle Hanzi mode which does not start with character count
-				// chinese mode contains a sub set indicator right after mode indicator
-				if (int subset = bits.readBits(4); subset != 1) // GB2312_SUBSET is the only supported one right now
-					throw FormatError("Unsupported HANZI subset");
-				int count = bits.readBits(CharacterCountBits(mode, version));
-				DecodeHanziSegment(bits, count, result);
-				break;
-			}
-			default: {
-				// "Normal" QR code modes:
-				// How many characters will follow, encoded in this mode?
-				int count = bits.readBits(CharacterCountBits(mode, version));
-				switch (mode) {
-				case CodecMode::NUMERIC:      DecodeNumericSegment(bits, count, result); break;
-				case CodecMode::ALPHANUMERIC: DecodeAlphanumericSegment(bits, count, result); break;
-				case CodecMode::BYTE:         DecodeByteSegment(bits, count, result); break;
-				case CodecMode::KANJI:        DecodeKanjiSegment(bits, count, result); break;
-				default:                      throw FormatError("Invalid CodecMode");
+			case CodecMode::BYTE:
+				LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d BYTE mode enter\n", iter);
+				{
+					int count = bits.readBits(CharacterCountBits(mode, version));
+					LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d BYTE CharacterCountBits count=%d\n", iter, count);
+					DecodeByteSegment(bits, count, result);
+					LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d BYTE segment exit\n", iter);
 				}
 				break;
+			case CodecMode::NUMERIC:
+				throw FormatError("Unexpected NUMERIC mode (only BYTE mode supported for binary data)");
+			case CodecMode::ALPHANUMERIC:
+				throw FormatError("Unexpected ALPHANUMERIC mode (only BYTE mode supported for binary data)");
+			case CodecMode::KANJI:
+				throw FormatError("Unexpected KANJI mode (only BYTE mode supported for binary data)");
+			case CodecMode::HANZI:
+				throw FormatError("Unexpected HANZI mode (only BYTE mode supported for binary data)");
+			default:
+				throw FormatError("Unknown codec mode");
 			}
-			}
+
+			const int afterAvail = bits.available();
+			LOG_DEBUG( "[zx-trace] DecodeBitStream iter=%d end avail=%d progress=%d\n", iter, afterAvail, beforeAvail - afterAvail);
+			if (afterAvail >= beforeAvail)
+				error = FormatError("DecodeBitStream made no forward progress");
 		}
 	} catch (std::out_of_range&) { // see BitSource::readBits
 		error = FormatError("Truncated bit stream");
@@ -321,26 +358,37 @@ DecoderResult DecodeBitStream(ByteArray&& bytes, const Version& version, ErrorCo
 
 DecoderResult Decode(const BitMatrix& bits)
 {
+	LOG_DEBUG( "[zx-trace] QRDecode enter w=%d h=%d\n", bits.width(), bits.height());
 	if (!Version::HasValidSize(bits))
 		return FormatError("Invalid symbol size");
 
+	LOG_DEBUG( "[zx-trace] QRDecode ReadFormatInformation enter\n");
 	auto formatInfo = ReadFormatInformation(bits);
+	LOG_DEBUG( "[zx-trace] QRDecode ReadFormatInformation exit valid=%d\n", formatInfo.isValid());
 	if (!formatInfo.isValid())
 		return FormatError("Invalid format information");
 
+	LOG_DEBUG( "[zx-trace] QRDecode ReadVersion enter\n");
 	const Version* pversion = ReadVersion(bits, formatInfo.type());
+	LOG_DEBUG( "[zx-trace] QRDecode ReadVersion exit valid=%d\n", pversion != nullptr);
 	if (!pversion)
 		return FormatError("Invalid version");
 
 	const Version& version = *pversion;
+	LOG_DEBUG( "[zx-trace] QRDecode version=%d type=%d totalCodewords=%d\n",
+			version.versionNumber(), static_cast<int>(version.type()), version.totalCodewords());
 
 	// Read codewords
+	LOG_DEBUG( "[zx-trace] QRDecode ReadCodewords enter\n");
 	ByteArray codewords = ReadCodewords(bits, version, formatInfo);
+	LOG_DEBUG( "[zx-trace] QRDecode ReadCodewords exit n=%zu\n", codewords.size());
 	if (codewords.empty())
 		return FormatError("Failed to read codewords");
 
 	// Separate into data blocks
+	LOG_DEBUG( "[zx-trace] QRDecode GetDataBlocks enter\n");
 	std::vector<DataBlock> dataBlocks = DataBlock::GetDataBlocks(codewords, version, formatInfo.ecLevel);
+	LOG_DEBUG( "[zx-trace] QRDecode GetDataBlocks exit n=%zu\n", dataBlocks.size());
 	if (dataBlocks.empty())
 		return FormatError("Failed to get data blocks");
 
@@ -353,14 +401,20 @@ DecoderResult Decode(const BitMatrix& bits)
 
 	// Error-correct and copy data blocks together into a stream of bytes
 	Error error;
+	size_t blockIndex = 0;
 	for (auto& dataBlock : dataBlocks)
 	{
+		++blockIndex;
 		ByteArray& codewordBytes = dataBlock.codewords();
 		int numDataCodewords = dataBlock.numDataCodewords();
 		auto blockUEC = CorrectErrors(codewordBytes, numDataCodewords);
+		LOG_DEBUG( "[zx-trace] QRDecode block[%zu/%zu] ec enter codewords=%zu data=%d\n",
+				blockIndex, dataBlocks.size(), codewordBytes.size(), numDataCodewords);
 
 		if (!blockUEC)
 			error = ChecksumError();
+		LOG_DEBUG( "[zx-trace] QRDecode block[%zu/%zu] ec exit checksumOk=%d\n",
+				blockIndex, dataBlocks.size(), !error);
 
 		uec = std::min(uec, blockUEC.value_or(0.0));
 
@@ -371,14 +425,17 @@ DecoderResult Decode(const BitMatrix& bits)
 									   : (version.isMicro() ? "M" : "") + std::to_string(version.versionNumber());
 
 	// Decode the contents of that stream of bytes
+	LOG_DEBUG( "[zx-trace] QRDecode DecodeBitStream enter n=%zu\n", resultBytes.size());
 	auto ret = DecodeBitStream(std::move(resultBytes), version, formatInfo.ecLevel)
 		.setIsMirrored(formatInfo.isMirrored)
 		.addExtra(BarcodeExtra::DataMask, formatInfo.dataMask, uint8_t(255))
 		.addExtra(BarcodeExtra::UEC, uec)
 		.addExtra(BarcodeExtra::Version, versionStr)
 		;
+	LOG_DEBUG( "[zx-trace] QRDecode DecodeBitStream exit valid=%d\n", ret.isValid());
 	if (error)
 		ret.setError(error);
+	LOG_DEBUG( "[zx-trace] QRDecode exit valid=%d\n", ret.isValid());
 	return ret;
 }
 
