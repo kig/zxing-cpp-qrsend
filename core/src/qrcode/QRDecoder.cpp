@@ -235,14 +235,7 @@ bool IsEndOfStream(const BitSource& bits, const Version& version)
 {
 	const int bitsRequired = TerminatorBitsLength(version);
 	const int bitsAvailable = std::min(bits.available(), bitsRequired);
-	if (bitsAvailable == 0) {
-		LOG_DEBUG( "[zx-trace] IsEndOfStream bitsAvailable=0 -> true\n");
-		return true;
-	}
-	LOG_DEBUG( "[zx-trace] IsEndOfStream peekBits(%d) enter\n", bitsAvailable);
-	bool result = bits.peekBits(bitsAvailable) == 0;
-	LOG_DEBUG( "[zx-trace] IsEndOfStream peekBits(%d) exit result=%d\n", bitsAvailable, result);
-	return result;
+	return bitsAvailable == 0 || bits.peekBits(bitsAvailable) == 0;
 }
 
 
